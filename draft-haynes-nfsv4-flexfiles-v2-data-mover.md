@@ -497,7 +497,7 @@ quiesced case they are recalled before the PS work starts.
   |                                 | <-- (policy decides: move)
   |                                 |
   | <---- CB_PROXY_MOVE ----------- | (back-channel)
-  | ----- operation_id ----------->|
+  | ----- operation_id -----------> |
   |                                 |
   |  [PS drives move: reads source  |
   |   DSes, encodes per destination |
