@@ -117,7 +117,26 @@ time; coexistence rules are in {{interaction}}.
 
 # Scope
 
+This section enumerates what the document does and does not
+specify.  The goal is to be explicit about the boundary
+between the wire-level mechanism defined here and the much
+larger space of useful behaviours a proxy implementation
+might support.  Drawing that boundary tightly keeps the
+protocol small enough to specify and implement in a single
+revision; everything beyond the boundary is either future
+work or implementation latitude.
+
 ## In Scope
+
+The document defines a new protocol role, a new session, and
+a small set of operations that flow on that session.  It also
+covers the layout conventions clients observe during a proxy
+operation, the rules for matching clients to co-resident
+proxies, the credential-forwarding rules for proxies that
+translate on behalf of clients, and the recovery semantics
+for the three actor failures that matter (PS, MDS, DS).
+
+The enumerated items:
 
 -  A **proxy server (PS)** role, distinct from the MDS and DS
    roles defined in {{I-D.haynes-nfsv4-flexfiles-v2}}.
@@ -143,14 +162,15 @@ time; coexistence rules are in {{interaction}}.
 -  **Codec translation for codec-ignorant clients**, including
    NFSv3 clients.  The same proxy machinery that handles move
    and repair also provides the persistent-per-client
-   translation that lets a client which cannot participate in a
-   file's native codec still read and write the file.  Unlike
-   move and repair (which are transient transitions on a file),
-   codec translation is an ongoing routing arrangement that
-   persists as long as the codec-ignorant client is active.
+   translation that lets a client which cannot participate in
+   a file's native codec still read and write the file.
+   Unlike move and repair (which are transient transitions on
+   a file), codec translation is an ongoing routing
+   arrangement that persists as long as the codec-ignorant
+   client is active.
 -  Co-residency attestation ("affinity matching") between a
-   client and a local proxy via the PROXY_REGISTRATION affinity
-   token.
+   client and a local proxy via the PROXY_REGISTRATION
+   affinity token.
 -  **Credential forwarding rules** for proxies that translate
    on behalf of clients.  The proxy is a translator, not an
    authority; authorization decisions MUST remain with the
@@ -161,18 +181,29 @@ time; coexistence rules are in {{interaction}}.
 
 ## Out of Scope
 
--  Journaled delta capture during a move.  A CB_PROXY_MOVE in this
-   revision is either quiesced (clients recalled, new layout
-   issued after the move completes) or dual-written (proxy
-   replicates writes to source and destination while active).
-   Delta-journaling mechanisms that allow a proxy to capture
-   writes against an otherwise-offline source, replay them on
-   completion, or maintain reference integrity across detached
-   clones are a future extension.
+Features below are deliberately deferred.  Most have already
+been discussed during design and were left out either because
+they add substantial state to a protocol that is already
+doing new work (delta journaling, multi-proxy pipelines),
+because they are a proxy implementation concern that does not
+surface on the wire (encryption and compression pass-through,
+alignment normalization), or because they are adjacent but
+better specified elsewhere (server-side copy).  Nothing on
+this list is precluded by the current design; each is a
+reasonable future extension.
+
+-  Journaled delta capture during a move.  A CB_PROXY_MOVE in
+   this revision is either quiesced (clients recalled, new
+   layout issued after the move completes) or dual-written
+   (proxy replicates writes to source and destination while
+   active).  Delta-journaling mechanisms that allow a proxy
+   to capture writes against an otherwise-offline source,
+   replay them on completion, or maintain reference integrity
+   across detached clones are a future extension.
 
 -  Partial-range CB_PROXY_MOVE (moving a byte range while the
-   rest of the file stays on the source).  CB_PROXY_MOVE in this
-   revision is always whole-file.
+   rest of the file stays on the source).  CB_PROXY_MOVE in
+   this revision is always whole-file.
 
 -  Proxy pipelines (multi-proxy staged moves for very large
    files).
@@ -181,8 +212,8 @@ time; coexistence rules are in {{interaction}}.
    registered proxies.
 
 -  Integration with server-side copy ({{RFC7862}} Section 4)
-   as an alternative to CB_PROXY_MOVE for single-file moves within
-   one namespace.
+   as an alternative to CB_PROXY_MOVE for single-file moves
+   within one namespace.
 
 -  Protocol support for proxy-side features that are
    implementation-internal and do not surface on the wire:
@@ -190,10 +221,10 @@ time; coexistence rules are in {{interaction}}.
    pass-through, compression pass-through, log-structured
    write staging, sector-alignment normalization, and
    POSIX-loopback shortcuts when proxy and client are
-   co-resident.  These are useful motivating scenarios for the
-   CB_PROXY_MOVE op but do not require new protocol surface
-   beyond what CB_PROXY_MOVE already provides.  A proxy MAY
-   implement any or all of them.
+   co-resident.  These are useful motivating scenarios for
+   the CB_PROXY_MOVE op but do not require new protocol
+   surface beyond what CB_PROXY_MOVE already provides.  A
+   proxy MAY implement any or all of them.
 
 # Use Cases
 
@@ -1420,6 +1451,26 @@ using CHUNK semantics.  This is the same pattern
 
 # Security Considerations
 
+The security surface added by this document sits in two
+places: the session the PS establishes with the MDS, and the
+data path clients take through the PS during a proxy
+operation.  The session is narrower than the data path --
+only the MDS talks to the PS over it, and the MDS has long
+been a trusted coordinator in the pNFS model -- but it
+carries operations that affect every client whose layouts
+reach a PS.  The data path is broader, because it exposes
+the PS to every client whose layout has the FFV2_DS_FLAGS_PROXY
+flag; a compromised PS on that path has the same observational
+and modification reach as a compromised DS, and in the
+translating-PS case a larger reach because of the elevated
+identity the PS typically runs with.
+
+The numbered items below name the specific threats the
+design either addresses or explicitly leaves out of scope.
+The rule on credential forwarding, because it is the most
+consequential and the most easily implemented incorrectly,
+is expanded in {{sec-credential-forwarding}}.
+
 1.  **PS authority.**  A PS in PROXY_ACTIVE sees all client
     I/O for the proxied file.  A compromised PS can observe
     or modify file data.  Deployments MUST treat PS-capable
@@ -1474,7 +1525,7 @@ using CHUNK semantics.  This is the same pattern
     destination DSes).  The MDS MUST NOT continue to route
     client I/O to a PS whose registration has lapsed.
 
-## Credential Forwarding and the Privilege Boundary
+## Credential Forwarding and the Privilege Boundary {#sec-credential-forwarding}
 
 A translating PS (see {{sec-codec-translation}}) has
 structurally elevated privilege by design.  To perform its
@@ -1498,7 +1549,18 @@ this document calls it out rather than hiding it.
 The normative requirements below apply whenever a PS is
 translating client-initiated file I/O (as distinct from
 PS-driven move / repair work, which runs under the PS's own
-authority on directives from the MDS).
+authority on directives from the MDS).  They form a cohesive
+set: credential pass-through (rule 1) is the core
+requirement; no-squash-inversion (rule 2) closes the most
+common way rule 1 can be implemented incorrectly;
+authorization-remains-with-MDS (rule 3) names the
+responsibility on the MDS side of the same contract;
+service-identity-is-for-the-control-plane (rule 4) draws the
+line between the op paths where the PS uses its own
+credentials and the op paths where it does not; and the
+failure-mode rule (rule 5) specifies the correct refusal
+behaviour rather than letting a silent fall-through become
+the escape hatch.
 
 1.  **Credential pass-through.**  The PS MUST present the
     client's credentials (RPC auth flavor and principal) on
