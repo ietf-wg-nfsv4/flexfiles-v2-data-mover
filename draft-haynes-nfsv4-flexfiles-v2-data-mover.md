@@ -1221,32 +1221,33 @@ A client that observes a layout with FFV2_DS_FLAGS_PROXY:
     informational reasons but MUST NOT be addressed by the
     client.
 
-3.  Uses its existing layout stateid against the proxy DS.
-    The proxy accepts CHUNK ops under that stateid (the MDS
-    has registered the stateid via TRUST_STATEID on the proxy
-    per main-draft tight-coupling semantics).
+3.  Uses its existing layout stateid against the PROXY-flagged
+    DS entry.  The PS accepts CHUNK ops under that stateid
+    (the MDS has registered the stateid via TRUST_STATEID on
+    the PS per the tight-coupling semantics in
+    {{I-D.haynes-nfsv4-flexfiles-v2}}).
 
-4.  Handles proxy-side errors (NFS4ERR_DELAY, connection loss,
+4.  Handles PS-side errors (NFS4ERR_DELAY, connection loss,
     NFS4ERR_BAD_STATEID) exactly as it would any other DS
     error: LAYOUTERROR to the MDS and expect a new layout or
-    proxy reassignment.
+    PS reassignment.
 
 ## When the Layout Is Recalled
 
-If the MDS recalls the layout mid-operation (the proxy failed
-and is being replaced, or the operation completed and normal DS
-layouts are being reissued), the client LAYOUTRETURNs as usual
-and reacquires via LAYOUTGET.  The new layout may have a
-different proxy, a different proxy set, or no proxy entry if
-the operation has completed.
+If the MDS recalls the layout mid-operation (the PS failed
+and is being replaced, or the operation completed and normal
+DS layouts are being reissued), the client LAYOUTRETURNs as
+usual and reacquires via LAYOUTGET.  The new layout may name
+a different PS, a different mirror set, or no PROXY-flagged
+entry if the operation has completed.
 
-## In-Flight I/O When the Proxy Changes
+## In-Flight I/O When the PS Changes
 
-In-flight I/O to the old proxy when the MDS recalls the layout
-MAY complete at the old proxy; results remain valid under the
-old proxy's authority.  New I/O issued after LAYOUTRETURN MUST
-go through the replacement proxy (or, if the new layout has no
-proxy, directly to the DSes named there).
+In-flight I/O to the old PS when the MDS recalls the layout
+MAY complete at the old PS; results remain valid under the
+old PS's authority.  New I/O issued after LAYOUTRETURN MUST
+go through the replacement PS (or, if the new layout has no
+PROXY-flagged entry, directly to the DSes named there).
 
 # State Machine
 
@@ -1313,40 +1314,40 @@ proxy, directly to the DSes named there).
 | COMMITTING | DONE | All clients have LAYOUTRETURNed | MDS issues post-move layouts; source DSes retired |
 | PROXY_ACTIVE | READY | PS failed and no replacement available; or MDS-initiated cancellation via CB_PROXY_CANCEL | MDS reverts layouts to pre-move source set |
 
-# Proxy Failure and Recovery
+# PS Failure and Recovery
 
-## Proxy Crash During PROXY_ACTIVE
+## PS Crash During PROXY_ACTIVE
 
-1.  Client I/O to the proxy receives NFS4ERR_DELAY (if the
-    proxy is reachable but unhealthy) or connection errors (if
+1.  Client I/O to the PS receives NFS4ERR_DELAY (if the PS is
+    reachable but unhealthy) or connection errors (if
     unreachable).  Clients report LAYOUTERROR.
 
-2.  The MDS MAY select a replacement proxy from the registered
-    pool and issue CB_PROXY_MOVE / CB_PROXY_REPAIR to the
+2.  The MDS MAY select a replacement PS from the registered
+    pool and issue CB_PROXY_MOVE or CB_PROXY_REPAIR to the
     replacement, with the source layout updated to reflect
-    current reality (destination DSes that the failed proxy
+    current reality (destination DSes that the failed PS
     populated are now part of the source set) and the
-    destination layout unchanged.  The replacement proxy
-    resumes from wherever the failed proxy left off.
+    destination layout unchanged.  The replacement PS resumes
+    from wherever the failed PS left off.
 
 3.  The MDS issues CB_LAYOUTRECALL on the old layout and the
-    replacement proxy's layout becomes live for new LAYOUTGETs.
+    replacement PS's layout becomes live for new LAYOUTGETs.
 
 4.  If the MDS cannot find a replacement within a policy
     timeout, it MUST cancel the operation: revert to the
     pre-move source layout, do not issue a destination layout,
-    mark the destination DSes for cleanup or retry.
+    and mark the destination DSes for cleanup or retry.
 
-## Cascading Proxy Failure
+## Cascading PS Failure
 
-Repeated proxy failures on the same operation SHOULD trigger
+Repeated PS failures on the same operation SHOULD trigger
 escalation to deployment management rather than recursive
 retry.  Recurring failures likely indicate an environmental
-issue the proxy cannot work around.
+issue the PS cannot work around.
 
 ## Source DS Crash During PROXY_ACTIVE
 
-Reduces the proxy's read parallelism but does not block forward
+Reduces the PS's read parallelism but does not block forward
 progress as long as the erasure code can still reconstruct
 from surviving source DSes.  If the source degrades past
 reconstructibility, the operation transitions to whole-file
@@ -1357,34 +1358,39 @@ operation with NFS4ERR_PAYLOAD_LOST.
 ## Destination DS Crash During PROXY_ACTIVE
 
 Treated as a normal DS failure on the destination side.  The
-proxy acts like a client to the destination DSes: LAYOUTERROR
-to the MDS, which MAY substitute a spare or mark the
-destination FFV2_DS_FLAGS_REPAIR.  The proxy continues pushing
-to the remaining destinations.  Clients are unaffected.
+PS acts like a client to the destination DSes: LAYOUTERROR to
+the MDS, which MAY substitute a spare or mark the destination
+FFV2_DS_FLAGS_REPAIR.  The PS continues pushing to the
+remaining destinations.  Clients are unaffected.
 
 # MDS Crash Recovery
 
-1.  Clients and the proxy detect MDS session loss and enter
+1.  Clients and the PS detect MDS session loss and enter
     RECLAIM per {{RFC8881}}.
 
-2.  The proxy reclaims its PROXY_REGISTRATION.  The MDS MAY
-    persist registrations across restart, or the proxy MAY
+2.  The PS reclaims its PROXY_REGISTRATION.  The MDS MAY
+    persist registrations across restart, or the PS MAY
     re-register; PROXY_REGISTRATION is idempotent as long as
-    prr_registration_id is preserved by the proxy.
+    prr_registration_id is preserved by the PS.
 
-3.  The MDS re-advertises proxy layouts (with the PROXY flag)
-    to reclaiming clients.
+3.  The MDS re-advertises proxy layouts (with
+    FFV2_DS_FLAGS_PROXY) to reclaiming clients.
 
-4.  If the MDS persisted its view of the active CB_PROXY_MOVE /
-    CB_PROXY_REPAIR operations (which destination DSes are
-    populated, which chunks are committed, etc.), the proxy
-    resumes from the last persisted checkpoint.  Persistence
-    is RECOMMENDED but not required; a non-persistent MDS
-    restarts the operation from the beginning.
+4.  If the MDS persisted its view of the active
+    CB_PROXY_MOVE and CB_PROXY_REPAIR operations (which
+    destination DSes are populated, which chunks are
+    committed, etc.), the PS resumes from the last persisted
+    checkpoint.  Persistence is RECOMMENDED but not required;
+    a non-persistent MDS restarts the operation from the
+    beginning.
 
-5.  If the MDS crashed between the proxy reporting completion
-    and the MDS issuing CB_LAYOUTRECALL, the MDS on restart
-    SHOULD re-drive the COMMITTING phase.
+5.  If the MDS crashed between the PS issuing a terminal
+    PROXY_PROGRESS and the MDS issuing CB_LAYOUTRECALL, the
+    MDS on restart SHOULD re-drive the COMMITTING phase.  The
+    PS MAY re-issue its terminal PROXY_PROGRESS on session
+    re-establishment; the MDS MUST treat a re-issued terminal
+    update as idempotent per the retry rules in
+    {{sec-PROXY_PROGRESS}}.
 
 # Backward Compatibility
 
@@ -1392,91 +1398,94 @@ to the remaining destinations.  Clients are unaffected.
 
 Client behavior is a normal layout path with a new flag.
 Clients that do not recognize FFV2_DS_FLAGS_PROXY will treat
-the proxy DS as any other DS and route I/O to it normally;
-that is in fact the correct behavior.  No client-side version
-negotiation is needed.
+the PROXY-flagged DS entry as any other DS and route I/O to
+it normally; that is in fact the correct behavior.  No
+client-side version negotiation is needed.
 
 Clients that require strict per-DS identity checking (e.g.,
 "the layout's DS must match a pre-allowlisted fingerprint")
-should extend their allowlist to include registered proxies.
-This is a deployment concern, not a protocol one.
+should extend their allowlist to include registered proxy
+servers.  This is a deployment concern, not a protocol one.
 
 ## Data Servers
 
-DSes without proxy capability simply do not call
-PROXY_REGISTRATION and are never selected as proxies.  A
-deployment with no registered proxies falls back to:
+A host that does not implement the proxy server role simply
+does not call PROXY_REGISTRATION and is never selected for a
+CB_PROXY_MOVE or CB_PROXY_REPAIR.  A deployment with no
+registered PS falls back to:
 
 -  Per-chunk CB_CHUNK_REPAIR for single-shard repair.
 -  Admin-coordinated offline procedures for policy transitions
    and DS evacuation.
 -  Blocking DS maintenance (the DS cannot drain through a
-   proxy).
+   PS).
 
-Deployments SHOULD ensure at least one registered proxy exists
-per failure domain to avoid a single point of failure on move
-operations.
+Deployments SHOULD ensure at least one registered PS exists
+per failure domain to avoid a single point of failure on
+move operations.
 
 ## NFSv3 Source DSes
 
-When the source mirror is an NFSv3 DS, the proxy reads from it
+When the source mirror is an NFSv3 DS, the PS reads from it
 using NFSv3 semantics and writes to the NFSv4.2 destination
-using CHUNK semantics.  This is the same pattern the main
-draft uses for InBand I/O.
+using CHUNK semantics.  This is the same pattern
+{{I-D.haynes-nfsv4-flexfiles-v2}} uses for InBand I/O.
 
 # Security Considerations
 
-1.  **Proxy authority.**  A proxy in PROXY_ACTIVE sees all
-    client I/O for the proxied file.  A compromised proxy can
-    observe or modify file data.  Deployments MUST treat
-    proxy-capable DSes as at least as trusted as the DSes
-    they proxy for.  PROXY_REGISTRATION SHOULD be gated by a
-    deployment-level allowlist; arbitrary DSes that present
-    the op without prior provisioning SHOULD be rejected.
+1.  **PS authority.**  A PS in PROXY_ACTIVE sees all client
+    I/O for the proxied file.  A compromised PS can observe
+    or modify file data.  Deployments MUST treat PS-capable
+    hosts as at least as trusted as the DSes they proxy for.
+    PROXY_REGISTRATION SHOULD be gated by a deployment-level
+    allowlist; arbitrary hosts that present the op without
+    prior provisioning SHOULD be rejected.
 
-2.  **Transport security across the operation.**  The proxy's
-    connections to source and destination DSes are independent
-    of the client's connection to the proxy.  A proxy MAY read
-    from an AUTH_SYS source and write to a TLS destination (or
-    any other combination).  The proxy is responsible for
-    enforcing the effective security policy (e.g., do not
-    downgrade encrypted data to a plaintext DS).
+2.  **Transport security across the operation.**  The PS's
+    connections to source and destination DSes are
+    independent of the client's connection to the PS.  A PS
+    MAY read from an AUTH_SYS source and write to a TLS
+    destination (or any other combination).  The PS is
+    responsible for enforcing the effective security policy
+    (e.g., do not downgrade encrypted data to a plaintext
+    DS).
 
 3.  **Principal binding during a proxy operation.**  For
-    proxy-to-DS traffic (the proxy reading source DSes and
-    writing destination DSes to carry out a CB_PROXY_MOVE or
-    CB_PROXY_REPAIR), the proxy presents a principal to those
-    DSes that they will accept; this is the proxy's own
-    service identity unless constrained delegation or
-    equivalent is arranged.  Forwarding the client's identity
-    to the peer DSes for proxy-driven data movement is NOT
-    required and is typically NOT practical (the client is
-    not in the conversation at that point).  See however the
-    Credential Forwarding and Privilege Boundary section
-    below for the case of client-initiated file I/O through a
-    translating proxy, where the credential-forwarding rule
-    is different and stricter.
+    PS-to-DS traffic (the PS reading source DSes and writing
+    destination DSes to carry out a CB_PROXY_MOVE or
+    CB_PROXY_REPAIR), the PS presents a principal to those
+    DSes that they will accept; this is the PS's own service
+    identity unless constrained delegation or equivalent is
+    arranged.  Forwarding the client's identity to the peer
+    DSes for PS-driven data movement is NOT required and is
+    typically NOT practical (the client is not in the
+    conversation at that point).  See the Credential
+    Forwarding and Privilege Boundary section below for the
+    case of client-initiated file I/O through a translating
+    PS, where the credential-forwarding rule is different and
+    stricter.
 
-4.  **Proxy impersonation.**  A malicious MDS could register a
-    hostile entity as a proxy.  The existing MDS trust model
+4.  **PS impersonation.**  A malicious MDS could register a
+    hostile entity as a PS.  The existing MDS trust model
     already grants the MDS this capability via
-    CB_LAYOUTRECALL + new layout; PROXY_REGISTRATION does not
-    weaken it.  Clients that require stronger proxy identity
-    verification SHOULD validate the proxy's transport-
-    security credentials against a deployment allowlist.
+    CB_LAYOUTRECALL and the ability to issue any layout it
+    chooses; PROXY_REGISTRATION does not weaken it.  Clients
+    that require stronger PS identity verification SHOULD
+    validate the PS's transport-security credentials against
+    a deployment allowlist.
 
 5.  **Affinity token.**  prr_affinity is a co-residency
-    attestation, not an authentication mechanism.  Matching an
-    affinity token between a proxy and a client grants the
+    attestation, not an authentication mechanism.  Matching
+    an affinity token between a PS and a client grants the
     client no new access rights; it is used only as input to
-    proxy-selection preferences.  A client cannot elevate
+    PS-selection preferences.  A client cannot elevate
     privilege by spoofing an affinity token.
 
-6.  **Registration lease expiry.**  If a proxy's lease expires
-    mid-operation, the MDS MUST cancel the operation (revert
-    layouts, mark destination DSes for cleanup).  The MDS
-    MUST NOT continue to route client I/O to a proxy whose
-    registration has lapsed.
+6.  **Registration lease expiry.**  If a PS's lease expires
+    mid-operation, the MDS MUST cancel the operation (via
+    CB_PROXY_CANCEL, followed by layout revert and cleanup of
+    destination DSes).  The MDS MUST NOT continue to route
+    client I/O to a PS whose registration has lapsed.
 
 ## Credential Forwarding and the Privilege Boundary
 
