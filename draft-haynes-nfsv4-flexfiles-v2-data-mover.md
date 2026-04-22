@@ -328,10 +328,10 @@ need translation.
 A translating proxy runs two sides:
 
 1.  **Client-facing**: the protocol the codec-ignorant client
-    can speak.  For an NFSv3 client this is an NFSv3 server
-    that re-exports the MDS's namespace.  For a legacy
-    NFSv4.2 client that understands only some codecs, this is
-    an NFSv4.2 data-server surface presenting
+    can speak.  For an NFSv3 {{RFC1813}} client this is an
+    NFSv3 server that re-exports the MDS's namespace.  For a
+    legacy NFSv4.2 client that understands only some codecs,
+    this is an NFSv4.2 data-server surface presenting
     FFV2_CODING_MIRRORED (or an equivalent codec the client
     supports).
 
