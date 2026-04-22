@@ -335,14 +335,14 @@ clients at the proxy (keeping their existing stateids and FHs
 intact), the proxy reconciles old-to-new FHs internally, and
 clients are recalled only at the end.
 
-This case also covers:
-
--  NFSv3-to-NFSv4.2 DS protocol upgrade (DS FHs change when the
-   DS migrates from RFC 1813 to RFC 8881 semantics).
--  DS-side format change that invalidates existing FHs
-   (e.g., transition from local POSIX store to object store).
--  Backend-opaque FH migration where the DS's FH structure is
-   internally versioned and old clients hold stale versions.
+This same mechanism covers several related situations: an
+NFSv3-to-NFSv4.2 DS protocol upgrade where the DS FHs change
+as a side effect of migrating from {{RFC1813}} to
+{{RFC8881}} semantics; a DS-side format change that
+invalidates existing FHs (for example, a transition from a
+local POSIX store to an object store); and backend-opaque FH
+migration where the DS's FH structure is internally
+versioned and old clients hold stale versions.
 
 ## Codec Translation for Codec-Ignorant Clients {#sec-codec-translation}
 
@@ -474,17 +474,14 @@ Only two of the three pairs carry new ops in this document:
 
 ## Session Between MDS and PS {#sec-design-session}
 
-The PS opens a session to the MDS.  On that session:
-
--  The PS is the session client.  PS-initiated ops --
-   PROXY_REGISTRATION and PROXY_PROGRESS -- flow as regular
-   ops on the fore-channel.
--  The MDS is the session server.  MDS-initiated ops --
-   CB_PROXY_MOVE, CB_PROXY_REPAIR, CB_PROXY_STATUS, and
-   CB_PROXY_CANCEL -- flow as callback ops on the
-   back-channel of the same session.
-
-A single session thus carries both directions of traffic.
+The PS opens a session to the MDS.  On that session the PS
+is the session client, so PS-initiated ops
+(PROXY_REGISTRATION and PROXY_PROGRESS) flow as regular ops
+on the fore-channel.  The MDS is the session server, so
+MDS-initiated ops (CB_PROXY_MOVE, CB_PROXY_REPAIR,
+CB_PROXY_STATUS, and CB_PROXY_CANCEL) flow as callback ops
+on the back-channel of the same session.  A single session
+thus carries both directions of traffic.
 
 The session direction is intentionally opposite to the
 MDS -> DS tight-coupling control session in
