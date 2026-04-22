@@ -659,26 +659,27 @@ subsequent CB_PROXY_MOVE and CB_PROXY_REPAIR directives on
 the session's back-channel.
 
 The prr_codecs field lists the ffv2_coding_type4 values the
-proxy supports.  The proxy MUST be able to encode, decode, and
+PS supports.  The PS MUST be able to encode, decode, and
 transcode between any pair of values in this list.  Because
-the transformation class of a CB_PROXY_MOVE is inherent in the
-(source, destination) layout pair, this codec-set membership
-is all the capability information the MDS needs to match.  An
-empty list results in NFS4ERR_INVAL in this revision.
+the transformation class of a CB_PROXY_MOVE is inherent in
+the (source, destination) layout pair, this codec-set
+membership is all the capability information the MDS needs
+to match.  An empty list results in NFS4ERR_INVAL in this
+revision.
 
-The prr_affinity field is an opaque token the proxy supplies
-for co-residency attestation with a client.  The MDS does not
+The prr_affinity field is an opaque token the PS supplies for
+co-residency attestation with a client.  The MDS does not
 interpret it.  At layout-grant time the MDS compares
 prr_affinity against the requesting client's co_ownerid
 (Section 18.35 of {{RFC8881}}); a match indicates that the
-client and proxy share a host, and the MDS MAY use it as input
-to proxy selection.  See {{sec-affinity}} for the matching
-algorithm.  An empty prr_affinity means the proxy does not
-claim co-residency with any client.
+client and the PS share a host, and the MDS MAY use it as
+input to PS selection.  See {{sec-affinity}} for the matching
+algorithm.  An empty prr_affinity means the PS does not claim
+co-residency with any client.
 
-The prr_lease field is the lease duration the proxy requests
-in seconds.  The MDS MAY grant a shorter one, returned in
-prr_granted_lease.  The proxy MUST renew before the granted
+The prr_lease field is the lease duration the PS requests in
+seconds.  The MDS MAY grant a shorter one, returned in
+prr_granted_lease.  The PS MUST renew before the granted
 lease expires; on expiry the MDS drops the registration and
 any in-flight CB_PROXY_MOVE or CB_PROXY_REPAIR is reassigned.
 
@@ -686,15 +687,16 @@ The prr_flags field is reserved for future use.  It MUST be
 set to 0 in this revision.
 
 On success, the MDS returns a prr_registration_id that
-identifies this registration.  The proxy uses it to renew the
-registration and to correlate CB_PROXY_MOVE and CB_PROXY_REPAIR
-directives the MDS subsequently issues.
+identifies this registration.  The PS uses it to correlate
+CB_PROXY_MOVE and CB_PROXY_REPAIR directives the MDS
+subsequently issues, and to renew the registration before
+the granted lease expires.
 
-Registration conveys capabilities only; the proxy's network
+Registration conveys capabilities only; the PS's network
 endpoint is conveyed through the same deviceinfo channel as
-any other DS's address.  When the MDS selects a proxy for an
+any other DS's address.  When the MDS selects a PS for an
 operation, the layout issued to clients includes a
-ffv2_data_server4 entry pointing at the proxy's existing
+ffv2_data_server4 entry pointing at the PS's existing
 deviceinfo.
 
 PROXY_REGISTRATION is issued on the fore-channel of the
