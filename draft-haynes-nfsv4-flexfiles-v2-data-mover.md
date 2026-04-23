@@ -24,6 +24,7 @@ normative:
   RFC7861:
   RFC7862:
   RFC7863:
+  RFC8178:
   RFC8881:
   RFC9289:
   I-D.haynes-nfsv4-flexfiles-v2:
@@ -68,23 +69,21 @@ active client to reconstruct individual damaged chunks.  That
 mechanism is sufficient for repairs whose scope is a handful of
 chunks in a file that has at least one live client.
 
-Three classes of work are outside the per-chunk repair model:
-
-1.  **Whole-file repair**, when enough data servers have failed
-    that per-chunk reconstruction would require visiting every
-    chunk, or when no live client is available to drive the
-    repair.
-
-2.  **Layout transitions**, when a file must move from one
-    layout geometry to another -- for policy reasons (migrating
-    to a new coding type, re-mirroring), for maintenance reasons
-    (data-server evacuation), or for environmental reasons
-    (migrating between transport-security profiles or between
-    filehandle backends).
-
-3.  **Codec translation**, when a client that cannot participate
-    in the file's native codec -- including NFSv3 clients --
-    still needs to read and write the file.
+Three classes of work are outside the per-chunk repair model.
+The first is **whole-file repair**: the case in which enough
+data servers have failed that per-chunk reconstruction would
+require visiting every chunk, or in which no live client is
+available to drive the repair at all.  The second is **layout
+transitions**: a file must move from one layout geometry to
+another for policy reasons (migrating to a new coding type, or
+re-mirroring), for maintenance reasons (evacuating a data
+server ahead of decommission), or for environmental reasons
+(moving between transport-security profiles or between
+filehandle backends).  The third is **codec translation**: a
+client that cannot participate in the file's native codec --
+including every NFSv3 client, and any legacy or minimal NFSv4
+client that does not implement the file's encoding type --
+still needs to read and write the file.
 
 This document specifies a **proxy server (PS)** role to
 address those three cases with a single mechanism: the PS
@@ -117,114 +116,145 @@ time; coexistence rules are in {{interaction}}.
 
 # Scope
 
-This section enumerates what the document does and does not
-specify.  The goal is to be explicit about the boundary
-between the wire-level mechanism defined here and the much
-larger space of useful behaviours a proxy implementation
-might support.  Drawing that boundary tightly keeps the
-protocol small enough to specify and implement in a single
-revision; everything beyond the boundary is either future
-work or implementation latitude.
+This section draws the boundary between the wire-level
+mechanism defined here and the much larger space of useful
+behaviours a proxy implementation might support.  Drawing
+the boundary tightly keeps the protocol small enough to
+specify and implement in a single revision; everything
+beyond the boundary is either future work or implementation
+latitude, and both categories are called out below so later
+readers know which is which.
 
 ## In Scope
 
-The document defines a new protocol role, a new session, and
-a small set of operations that flow on that session.  It also
-covers the layout conventions clients observe during a proxy
-operation, the rules for matching clients to co-resident
-proxies, the credential-forwarding rules for proxies that
-translate on behalf of clients, and the recovery semantics
-for the three actor failures that matter (PS, MDS, DS).
+This document defines a new protocol role, a new session,
+and a small set of operations that flow on that session.
+Around that core it specifies the layout conventions a
+client observes while a proxy operation is active, the
+rules that match a client to a co-resident proxy, the
+credential-forwarding rules a translating proxy must
+follow, and the recovery semantics for the three actor
+failures that matter during an operation (PS, MDS, DS).
 
-The enumerated items:
+The new role is the **proxy server (PS)**, distinct from
+the MDS and DS roles defined in
+{{I-D.haynes-nfsv4-flexfiles-v2}}.  A PS registers with an
+MDS and, on receipt of a directive from that MDS, performs
+a move, a repair, or an ongoing codec translation on behalf
+of a client.  The PS is opaque to most clients and is
+visible to the MDS through a dedicated session that the PS
+itself opens: the fore-channel (PS to MDS) carries
+PS-initiated ops, and the back-channel (MDS to PS) carries
+the MDS-initiated directives that drive work.
 
--  A **proxy server (PS)** role, distinct from the MDS and DS
-   roles defined in {{I-D.haynes-nfsv4-flexfiles-v2}}.
--  A dedicated MDS <-> PS session, opened by the PS.
-   Fore-channel (PS -> MDS) carries PS-initiated ops;
-   back-channel (MDS -> PS) carries MDS-initiated callback
-   ops.
--  Two PS-to-MDS regular ops on the fore-channel:
-   -  **PROXY_REGISTRATION** -- PS declares codec set,
-      affinity token, and lease.
-   -  **PROXY_PROGRESS** -- PS reports interim and terminal
-      status of an in-flight move or repair.
--  Four MDS-to-PS callback ops on the back-channel:
-   -  **CB_PROXY_MOVE** -- direct the PS to move a file from
-      a source layout to a destination layout.
-   -  **CB_PROXY_REPAIR** -- specialization of CB_PROXY_MOVE
-      where the source layout is degraded.
-   -  **CB_PROXY_STATUS** -- poll the PS for the current
-      status of an operation.
-   -  **CB_PROXY_CANCEL** -- cancel an in-flight operation.
--  The layout conventions clients see during a proxy
-   operation, and how clients discover the PS.
--  **Codec translation for codec-ignorant clients**, including
-   NFSv3 clients.  The same proxy machinery that handles move
-   and repair also provides the persistent-per-client
-   translation that lets a client which cannot participate in
-   a file's native codec still read and write the file.
-   Unlike move and repair (which are transient transitions on
-   a file), codec translation is an ongoing routing
-   arrangement that persists as long as the codec-ignorant
-   client is active.
--  Co-residency attestation ("affinity matching") between a
-   client and a local proxy via the PROXY_REGISTRATION
-   affinity token.
--  **Credential forwarding rules** for proxies that translate
-   on behalf of clients.  The proxy is a translator, not an
-   authority; authorization decisions MUST remain with the
-   MDS, using the client's forwarded credentials.  See the
-   Security Considerations section.
--  Recovery semantics for proxy / MDS / DS failures during a
-   proxy operation.
+The fore-channel surface is deliberately small.
+PROXY_REGISTRATION ({{sec-PROXY_REGISTRATION}}) lets the PS
+declare the codec set it supports, its co-residency
+affinity token, and its lease.  PROXY_PROGRESS
+({{sec-PROXY_PROGRESS}}) lets the PS report interim and
+terminal status of an in-flight operation.  The
+back-channel carries the four directives that together
+cover the entire move, repair, and translation lifecycle:
+CB_PROXY_MOVE ({{sec-CB_PROXY_MOVE}}) directs the PS to
+move a file from a source layout to a destination layout;
+CB_PROXY_REPAIR ({{sec-CB_PROXY_REPAIR}}) specialises that
+directive for the case where the source layout is degraded;
+CB_PROXY_STATUS ({{sec-CB_PROXY_STATUS}}) lets the MDS poll
+current status out-of-band from the PS's own progress
+reports; and CB_PROXY_CANCEL ({{sec-CB_PROXY_CANCEL}}) asks
+the PS to terminate an in-flight operation before
+completion.
+
+Around the operation set, the document specifies the layout
+conventions a client sees during a proxy operation and how
+a client discovers the PS in the first place.  Co-residency
+attestation -- the "affinity matching" machinery that makes
+host-local proxy shortcuts safe -- travels as an affinity
+token carried in PROXY_REGISTRATION and is described in
+{{sec-affinity}}.
+
+Codec translation for codec-ignorant clients, including
+NFSv3 clients, is in scope, and is the one case that
+stretches the move/repair vocabulary.  The same proxy
+machinery that handles move and repair also provides the
+persistent per-client translation that lets a client
+incapable of participating in a file's native codec still
+read and write the file.  Unlike move and repair, which are
+transient transitions on the file, codec translation is an
+ongoing routing arrangement that persists as long as the
+codec-ignorant client is active.
+
+Credential-forwarding rules for a proxy that translates on
+behalf of a client are defined in the Security
+Considerations section.  The proxy is a translator, not an
+authority: authorization decisions MUST remain with the
+MDS, using the client's forwarded credentials.  Getting
+this boundary wrong turns the PS into a privilege-elevation
+vehicle, so the rules are stated normatively and enforced
+at the MDS rather than policed on the wire.
+
+Finally, the document defines recovery semantics for the
+three actor failures that matter during a proxy operation
+-- PS failure, MDS failure, and DS failure -- each with its
+own fencing and re-registration rules so that a
+mid-operation crash does not leave a file in an
+unrecoverable state.
 
 ## Out of Scope {#sec-scope-out}
 
-Features below are deliberately deferred.  Most have already
-been discussed during design and were left out either because
-they add substantial state to a protocol that is already
-doing new work (delta journaling, multi-proxy pipelines),
-because they are a proxy implementation concern that does not
-surface on the wire (encryption and compression pass-through,
-alignment normalization), or because they are adjacent but
-better specified elsewhere (server-side copy).  Nothing on
+The items below are deliberately deferred.  They split
+into three groups: features whose absence was an explicit
+design decision (delta journaling, partial-range moves),
+orchestration that belongs to a layer above a single
+proxy (multi-proxy pipelines, automated load balancing),
+and proxy-internal behaviour that does not surface on the
+wire and therefore needs no standardisation.  Nothing on
 this list is precluded by the current design; each is a
 reasonable future extension.
 
--  Journaled delta capture during a move.  A CB_PROXY_MOVE in
-   this revision is either quiesced (clients recalled, new
-   layout issued after the move completes) or dual-written
-   (proxy replicates writes to source and destination while
-   active).  Delta-journaling mechanisms that allow a proxy
-   to capture writes against an otherwise-offline source,
-   replay them on completion, or maintain reference integrity
-   across detached clones are a future extension.
+**Journaling and partial moves.**  CB_PROXY_MOVE in this
+revision is always whole-file, and is either quiesced
+(clients recalled and a new layout issued after the move
+completes) or dual-written (the PS replicates writes to
+source and destination while active).  Delta-journaling
+mechanisms -- capturing writes against an otherwise-offline
+source, replaying them on completion, or maintaining
+reference integrity across detached clones -- are a future
+extension, as is a partial-range CB_PROXY_MOVE that would
+move a byte range while the rest of the file stays on the
+source.  The quiesced and dual-write modes together cover
+every motivating scenario the design currently has.
 
--  Partial-range CB_PROXY_MOVE (moving a byte range while the
-   rest of the file stays on the source).  CB_PROXY_MOVE in
-   this revision is always whole-file.
+**Orchestration beyond a single proxy.**  Multi-proxy
+pipelines (staged moves for very large files) and
+automated load balancing or predictive selection across
+registered proxies are out of scope.  An MDS in this
+revision selects a single PS per operation; load
+distribution across many proxies, when it matters, is
+expected to be handled by the MDS's selection policy and
+does not surface as new wire protocol.
 
--  Proxy pipelines (multi-proxy staged moves for very large
-   files).
+**Server-side copy as an alternative path.**  Integration
+with server-side copy ({{RFC7862}} Section 4) as an
+alternative to CB_PROXY_MOVE for single-file moves within
+one namespace is adjacent work.  The two mechanisms are
+complementary (server-side copy is a client-directed
+intra-server operation; CB_PROXY_MOVE is an MDS-directed
+inter-server operation), and their intersection -- for
+example, using server-side copy under the hood of a
+CB_PROXY_MOVE -- is better specified in its own extension
+rather than bolted into this document.
 
--  Automated load balancing or predictive selection across
-   registered proxies.
-
--  Integration with server-side copy ({{RFC7862}} Section 4)
-   as an alternative to CB_PROXY_MOVE for single-file moves
-   within one namespace.
-
--  Protocol support for proxy-side features that are
-   implementation-internal and do not surface on the wire:
-   content-integrity and error-correction layers, encryption
-   pass-through, compression pass-through, log-structured
-   write staging, sector-alignment normalization, and
-   POSIX-loopback shortcuts when proxy and client are
-   co-resident.  These are useful motivating scenarios for
-   the CB_PROXY_MOVE op but do not require new protocol
-   surface beyond what CB_PROXY_MOVE already provides.  A
-   proxy MAY implement any or all of them.
+**Proxy-internal features that do not surface on the
+wire.**  A proxy MAY implement content-integrity and
+error-correction layers, encryption and compression
+pass-through, log-structured write staging, sector-
+alignment normalisation, and POSIX-loopback shortcuts when
+proxy and client are co-resident.  These are useful
+motivating scenarios for CB_PROXY_MOVE but do not require
+new protocol surface beyond what CB_PROXY_MOVE already
+provides, and so they are left to implementation rather
+than standardised here.
 
 # Use Cases
 
@@ -375,21 +405,18 @@ need translation.
 
 ### Mechanism
 
-A translating proxy runs two sides:
-
-1.  **Client-facing**: the protocol the codec-ignorant client
-    can speak.  For an NFSv3 {{RFC1813}} client this is an
-    NFSv3 server that re-exports the MDS's namespace.  For a
-    legacy NFSv4.2 client that understands only some codecs,
-    this is an NFSv4.2 data-server surface presenting
-    FFV2_CODING_MIRRORED (or an equivalent codec the client
-    supports).
-
-2.  **MDS-facing**: an NFSv4.2 client to the MDS, plus
-    whatever DS protocol the MDS's real DSes speak.  The
-    proxy translates each client-facing op into the
-    corresponding MDS / DS ops, applies the codec
-    transformation, and returns results.
+A translating proxy runs two sides that meet internally.  On
+its **client-facing** side it speaks the protocol the
+codec-ignorant client can speak: for an NFSv3 {{RFC1813}}
+client that is an NFSv3 server that re-exports the MDS's
+namespace; for a legacy NFSv4.2 client that understands only
+some codecs, it is an NFSv4.2 data-server surface presenting
+FFV2_CODING_MIRRORED (or an equivalent codec the client
+supports).  On its **MDS-facing** side it is an NFSv4.2
+client to the MDS plus whatever DS protocol the MDS's real
+DSes speak.  The proxy translates each client-facing op into
+the corresponding MDS or DS op, applies the codec
+transformation between the two, and returns results.
 
 For an NFSv3 client, a read flows:
 
@@ -457,20 +484,17 @@ Data server (DS):
 :  As defined in {{I-D.haynes-nfsv4-flexfiles-v2}}: serves the
    CHUNK data path to pNFS clients.
 
-Only two of the three pairs carry new ops in this document:
-
--  **MDS <-> PS**: new PS-to-MDS regular ops for registration
-   and progress ({{sec-new-ops}}); new MDS-to-PS callback ops
-   for move, repair, status, and cancel
-   ({{sec-new-cb-ops}}).
-
--  **Client <-> PS**: none.  Clients reach a PS through the
-   normal pNFS data path, seeing it as a DS with
-   FFV2_DS_FLAGS_PROXY set in the layout
-   ({{sec-layout-shape}}).
-
--  **MDS <-> DS**: none.  The tight-coupling control session
-   ({{I-D.haynes-nfsv4-flexfiles-v2}}) is unchanged.
+Only one of the three pairs carries new ops in this document.
+The MDS <-> PS pair gains the new PS-to-MDS regular ops for
+registration and progress ({{sec-new-ops}}) and the new
+MDS-to-PS callback ops for move, repair, status, and cancel
+({{sec-new-cb-ops}}).  The Client <-> PS pair gains no new
+ops: clients reach a PS through the normal pNFS data path,
+seeing it as a DS with FFV2_DS_FLAGS_PROXY set in the layout
+({{sec-layout-shape}}).  The MDS <-> DS pair is also
+unchanged; the tight-coupling control session in
+{{I-D.haynes-nfsv4-flexfiles-v2}} carries over as defined
+there.
 
 ## Session Between MDS and PS {#sec-design-session}
 
@@ -496,6 +520,32 @@ of capabilities a PS can usefully advertise (codec set,
 affinity token, and -- as the DEVICEID_REGISTRATION open
 question anticipates -- fault-zone coordinates and other
 deployment attributes).
+
+A consequence of this direction choice is that a server
+that implements both the DS and PS roles toward the same MDS
+runs two sessions between the same pair of hosts: the MDS
+opens the DS tight-coupling session toward the box, and the
+box's PS opens the PS session toward the MDS.  That is two
+EXCHANGE_ID exchanges, two CREATE_SESSION exchanges, and two
+TCP connections.  The cost is asymmetric: the MDS consumes
+no additional reserved local port under AUTH_SYS (the PS
+session is inbound from the MDS's point of view), while the
+combined DS+PS box consumes one additional outbound reserved
+port per registered MDS (the PS session is outbound from the
+box).  In deployments that use RPCSEC_GSS ({{RFC7861}}) or
+RPC-over-TLS ({{RFC9289}}) on the PS session --
+which the credential-forwarding rules in
+{{sec-security}} recommend for any PS that translates on
+behalf of clients -- reserved-port trust is not in use and
+this cost does not apply.  In a strict AUTH_SYS-only
+deployment the additional reserved port is a real but
+typically negligible cost, because a storage box's outbound
+NFS traffic is usually limited to one connection per MDS it
+is registered with.  Consolidating the two sessions is
+possible but would require flipping the channel on which
+either the tight-coupling ops or the proxy ops travel, with
+the corresponding ripple in {{I-D.haynes-nfsv4-flexfiles-v2}};
+that consolidation is not attempted here.
 
 ## Flow Summary
 
@@ -728,8 +778,30 @@ prr_granted_lease.  The PS MUST renew before the granted
 lease expires; on expiry the MDS drops the registration and
 any in-flight CB_PROXY_MOVE or CB_PROXY_REPAIR is reassigned.
 
-The prr_flags field is reserved for future use.  It MUST be
-set to 0 in this revision.
+The prr_flags field is reserved for future use.  In this
+revision the PS MUST set prr_flags to 0, and an MDS that
+receives a PROXY_REGISTRATION with any bit of prr_flags set
+MUST reject it with NFS4ERR_INVAL.
+
+The "reject, don't ignore" rule follows the NFSv4 extension
+model in {{RFC8178}}.  Section 8 of {{RFC8178}} specifies
+that when a flag bit is used that is not known in the
+specified minor version, NFS4ERR_INVAL is returned; Section
+4.4.3 of {{RFC8178}} then explains that this same error is
+how a requester determines whether the responder understands
+the bit.  Silently ignoring an unknown bit would break that
+discovery contract: a PS that sets a future capability bit
+against an MDS that pre-dates the bit could not tell whether
+the MDS honored the capability or simply dropped it.
+
+A future revision of this specification (or a successor
+document that updates it) MAY define new bit values in
+prr_flags, following the extension rules of Section 4.2 of
+{{RFC8178}}.  A PS that understands a newly defined bit MAY
+set it when registering with an MDS that supports it; on
+NFS4ERR_INVAL the PS MAY retry with the bit cleared,
+treating the response as the {{RFC8178}} Section 4.4.3
+signal that the MDS does not recognize the bit.
 
 On success, the MDS returns a prr_registration_id that
 identifies this registration.  The PS uses it to correlate
@@ -1249,15 +1321,18 @@ and destination DSes.
 ## Single-Layout Model
 
 This design uses a single layout with a PROXY-flagged entry
-rather than two linked layouts.  pNFS clients already handle
-single layouts cleanly, so no new layout-linkage mechanism is
-needed; the client's view ("the file's DS is the PS") is the
-truth during the operation, and exposing the source and
-destination DSes directly would invite confusion about which
-entry to address; and late-arriving clients see the proxy
-layout from the start without any separate setup path.  The
-alternative (a source layout plus a destination layout linked
-by a redirector record) was considered and rejected on those
+rather than two linked layouts.  Three considerations drive
+that choice.  pNFS clients already handle single layouts
+cleanly, so no new layout-linkage mechanism needs to be
+invented or implemented on the client.  The client's view of
+the file -- "the file's DS is the PS" -- is the truth during
+the operation, so exposing the source and destination DSes
+directly would invite confusion about which entry to address
+rather than clarify.  And late-arriving clients see the proxy
+layout from the start, without any separate setup path to
+join an operation already in progress.  The alternative -- a
+source layout plus a destination layout linked by a
+redirector record -- was considered and rejected on those
 three grounds.
 
 # Client Behavior
@@ -1490,7 +1565,7 @@ using NFSv3 semantics and writes to the NFSv4.2 destination
 using CHUNK semantics.  This is the same pattern
 {{I-D.haynes-nfsv4-flexfiles-v2}} uses for InBand I/O.
 
-# Security Considerations
+# Security Considerations {#sec-security}
 
 The security surface added by this document sits in two
 places: the session the PS establishes with the MDS, and the
@@ -1801,7 +1876,14 @@ of it.
 1.  **Registration renewal semantics.**  Is renewal a fresh
     PROXY_REGISTRATION with the same prr_registration_id
     (idempotent), or a separate PROXY_RENEW op (lighter-
-    weight)?
+    weight)?  The idempotent-reregistration path keeps the op
+    count smaller and keeps renewal and first-time
+    registration on a single code path, at the cost of
+    carrying codec and affinity fields on every renewal.  A
+    dedicated PROXY_RENEW op is cheaper on the wire but adds
+    an op number and a second code path.  The choice mostly
+    affects implementation complexity, not protocol
+    expressiveness.
 
 2.  **Affinity match predicate.**  Is exact equality of
     prr_affinity and co_ownerid sufficient, or does the spec
@@ -1813,13 +1895,33 @@ of it.
 3.  **Multiple concurrent proxies per file.**  The design
     assumes one proxy per file per operation.  Should two
     proxies be allowed to pipeline a large file (proxy A
-    drives the first 1 TB, proxy B drives the next)?  Adds
-    state-machine complexity.
+    drives the first 1 TB, proxy B drives the next)?  The
+    motivating case is a multi-terabyte move where a single
+    proxy's bandwidth is the bottleneck; parallelizing across
+    proxies would shorten the operation proportionally.  The
+    cost is state-machine complexity (two operation ids to
+    track, partial-completion bookkeeping, range ownership
+    between proxies) and layout complexity (the client sees
+    two PS entries in ffs_data_servers and needs routing
+    rules between them).  One-proxy-per-file keeps the
+    mechanism simple; if the bandwidth case turns out to
+    dominate in practice, a follow-on extension can add
+    parallelism later without invalidating the single-proxy
+    path.
 
 4.  **Transitive proxy.**  If a file in PROXY_ACTIVE needs a
-    second move (e.g., DS maintenance interrupts a repair),
-    what happens?  Queue the second move?  Abort the first?
-    Allow a proxy to act as the source for another proxy?
+    second move (e.g., a DS maintenance window opens while a
+    repair is already running), what happens?  Queueing the
+    second move postpones the maintenance, which may not be
+    acceptable if the maintenance window is hard.  Aborting
+    the first move wastes the repair work already done and
+    puts the file back into a degraded state.  Allowing a
+    proxy to act as the source for another proxy (a "chained"
+    proxy setup) preserves the repair progress but doubles the
+    state-machine work and introduces failure-mode compounds
+    that the current design does not cover.  The right answer
+    probably depends on operator priorities and may need to be
+    a configurable MDS policy rather than a protocol rule.
 
 5.  **Persistent vs ephemeral MDS operation state.**  Is
     operation persistence a SHOULD or a MAY?  Production
