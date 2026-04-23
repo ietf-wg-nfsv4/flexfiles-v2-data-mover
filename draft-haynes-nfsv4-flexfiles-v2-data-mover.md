@@ -675,8 +675,8 @@ the back-channel of the same session and are defined in
 ~~~ xdr
 /// /* New operations for the Data Mover (PS -> MDS) */
 ///
-/// OP_PROXY_REGISTRATION   = 91;
-/// OP_PROXY_PROGRESS       = 92;
+/// OP_PROXY_REGISTRATION   = 93;
+/// OP_PROXY_PROGRESS       = 94;
 ~~~
 {: #fig-data-mover-opnums title="Data Mover operation numbers"}
 
@@ -713,7 +713,7 @@ point.
 ~~~
 {: #fig-nfs_resop4-amend title="nfs_resop4 amendment block"}
 
-## Operation 91: PROXY_REGISTRATION - Register as Data Mover {#sec-PROXY_REGISTRATION}
+## Operation 93: PROXY_REGISTRATION - Register as Data Mover {#sec-PROXY_REGISTRATION}
 
 ### ARGUMENTS
 
@@ -822,9 +822,49 @@ the MDS; it is distinct from the MDS -> DS tight-coupling
 control session defined by {{I-D.haynes-nfsv4-flexfiles-v2}}
 even when the same host acts as both DS and PS.  The PS MUST
 present EXCHGID4_FLAG_USE_NON_PNFS on the session so that
-the MDS can distinguish it from a regular pNFS client.
+the MDS can distinguish it from a regular pNFS client.  An MDS
+that receives PROXY_REGISTRATION on a session whose owning
+client did not present EXCHGID4_FLAG_USE_NON_PNFS MUST reject
+it with NFS4ERR_PERM.
 
-## Operation 92: PROXY_PROGRESS - Report Progress on an In-Flight Proxy Operation {#sec-PROXY_PROGRESS}
+Before recording the registration, the MDS MUST validate the
+PS's transport-security identity against a deployment
+allowlist.  Acceptable identities are the PS's RPCSEC_GSS
+machine principal or the PS's RPC-over-TLS client-certificate
+identity, matching the MDS <-> PS transport-security rule in
+{{sec-credential-forwarding}}.  The MDS MUST reject a
+PROXY_REGISTRATION from any identity not on the allowlist with
+NFS4ERR_PERM.  AUTH_SYS, even over a transport that is
+otherwise authenticated, is never a valid authenticator for
+this operation; the MDS MUST reject it.
+
+Because one PS proxies one MDS, a successful rogue registration
+displaces the legit PS and returns NFS4ERR_STALE to every
+client holding cached filehandles against the previous PS.  To
+guard against registration squatting, the MDS MUST refuse a
+new PROXY_REGISTRATION from an allowlisted identity while an
+existing registration from that same identity still holds a
+valid lease; the MDS returns NFS4ERR_DELAY and SHOULD log the
+conflict.  A renewal -- distinguished by the PS re-presenting
+the same prr_registration_id it received on the prior
+registration -- is not squatting and the MDS MUST accept it
+(refreshing the granted lease).
+
+Registration revocation before lease expiry is not a dedicated
+operation in this revision.  An MDS that needs to revoke a PS
+before its lease expires MUST cease issuing CB_PROXY_MOVE,
+CB_PROXY_REPAIR, CB_PROXY_STATUS, and CB_PROXY_CANCEL to that
+PS; MUST return NFS4ERR_STALE_CLIENTID on subsequent
+PROXY_PROGRESS or PROXY_REGISTRATION-renewal from the revoked
+PS; and MUST handle in-flight CB_PROXY_MOVE or CB_PROXY_REPAIR
+as if the lease had expired (see the lease-expiry paragraph
+above): preferably CB_PROXY_CANCEL where the back-channel is
+still reachable, layout revert to the pre-operation state
+otherwise.  A future revision MAY define a dedicated
+PROXY_REVOKE operation if operational experience shows lease
+revocation through silence is insufficient.
+
+## Operation 94: PROXY_PROGRESS - Report Progress on an In-Flight Proxy Operation {#sec-PROXY_PROGRESS}
 
 ### ARGUMENTS
 
@@ -1308,9 +1348,14 @@ and destination mirror sets are internal to the PS.
 
 The PROXY flag is a new bit on ffv2_ds_flags4:
 
+~~~ xdr
+/// const FFV2_DS_FLAGS_PROXY         = 0x00000040;
 ~~~
-const FFV2_DS_FLAGS_PROXY = 0x00000040;  // TBD, IANA alloc
-~~~
+{: #fig-FFV2_DS_FLAGS_PROXY title="FFV2_DS_FLAGS_PROXY" }
+
+As per {{I-D.haynes-nfsv4-flexfiles-v2}}'s Flag-Word Allocation
+rule, IANA does not maintain a registry for ffv2_ds_flags4; the
+bit is governed by this document.
 
 When FFV2_DS_FLAGS_PROXY is set on any data server entry in
 a layout, clients MUST direct all CHUNK I/O for this file to
@@ -1697,8 +1742,12 @@ the escape hatch.
     unsquashed root, even though the PS's own identity is
     typically unsquashed.
 
-3.  **Authorization remains with the MDS.**  The MDS MUST
-    perform access-control checks against the forwarded
+3.  **Authorization remains with the MDS.**  When a client-
+    initiated operation reaches the MDS over a PS <-> MDS
+    session, the MDS MUST use the RPC credentials carried on
+    that compound for authorization and MUST NOT substitute
+    the PS's session-level identity.  Equivalently: the MDS
+    performs access-control checks against the forwarded
     client credentials, not against the PS's service
     identity, for any client-initiated file operation.  The
     PS is a translator, not an authority.  This is what
@@ -1775,12 +1824,103 @@ support it; deployments that can use GSSv3 SHOULD prefer it
 over AUTH_SYS passthrough for the credential-forwarding
 channel.
 
+## Namespace Traversal Privilege {#sec-namespace-traversal-privilege}
+
+A PS that translates client I/O has to know how the MDS's
+namespace is shaped: which paths are exported, what filehandle
+each path resolves to, how the exports mount within one another.
+The PS acquires this information by traversing the MDS's
+namespace -- LOOKUP, LOOKUPP, PUTFH, PUTROOTFH, GETFH on the
+PS <-> MDS session.
+
+This traversal cannot always run under forwarded client
+credentials: at the point the PS needs to discover a new export
+(a client has not yet asked for it, or the PS has just restarted
+and has no FH cache) there is no client whose credentials the PS
+could forward.  Deployments have two choices for how the PS
+acquires namespace shape:
+
+1.  **Grant a narrow traversal privilege.**  The MDS MAY treat
+    a registered PS's service identity as authorized for
+    LOOKUP, LOOKUPP, PUTFH, PUTROOTFH, GETFH, and SEQUENCE on
+    the PS <-> MDS session without applying the MDS's
+    export-rule filtering that would normally gate those
+    names.  This is strictly a structural privilege: it
+    permits the PS to see that paths exist and to obtain their
+    filehandles, but grants no data access.  All operations
+    that carry or require data authorization (OPEN, READ,
+    WRITE, LAYOUTGET, GETATTR of privileged attributes, etc.)
+    MUST still run under the rules of
+    {{sec-credential-forwarding}}: forwarded client
+    credentials for client-initiated operations, and PS
+    service identity only for control-plane operations.
+
+    A deployment that grants this privilege discloses the
+    MDS's namespace shape to the PS's service identity --
+    specifically, names that the PS's source address would
+    not be able to see through the MDS's normal export
+    filtering.  Deployments SHOULD audit traversal compounds
+    on registered-PS sessions so the disclosure is reviewable;
+    the MDS SHOULD log each LOOKUP / GETFH that benefits from
+    the bypass.
+
+2.  **Do not grant the privilege.**  The PS is required to
+    translate every client-originated LOOKUP into a separate
+    LOOKUP against the MDS under the forwarding client's
+    credentials, caching only what the client's credentials
+    authorized the MDS to return.  This eliminates the
+    namespace-shape disclosure but costs an extra MDS
+    round-trip per client LOOKUP-miss and leaves the PS
+    unable to pre-discover exports.
+
+This document does not normatively prefer one approach over
+the other.  Implementations SHOULD document which they use;
+deployment guidance for the common combined DS+PS case is
+that option (1) is expected and the narrower privilege is
+acceptable given the PS is already a trusted control-plane
+peer of the MDS.
+
+The traversal privilege is distinct from and narrower than
+root_squash bypass.  A forwarded-uid-0 client operation (OPEN,
+READ, etc.) under option (1) is still subject to normal
+root_squash handling on the PS's source-address rule at the
+MDS; the traversal privilege applies only to the six ops
+enumerated above.
+
+## PS-Side Policy Enforcement (informative) {#sec-ps-side-policy-enforcement}
+
+A PS implementation MAY perform per-client export-rule
+enforcement locally, rejecting operations the MDS would also
+reject before forwarding them.  This is a performance
+optimization: it keeps bad requests off the PS <-> MDS wire and
+lets the PS return NFS4ERR_WRONGSEC / NFS4ERR_ACCESS without
+paying a round-trip.
+
+Local enforcement is not a security boundary.  Rule 3 of
+{{sec-credential-forwarding}} names the MDS as the authority
+for every client-initiated file operation.  A PS that performs
+local enforcement is checking its own cached copy of the MDS's
+per-client rules; if the copy is stale, wrong, or absent, the
+PS MUST forward the operation and let the MDS decide.  A PS
+implementation that declines to perform local enforcement is
+conformant with this specification.
+
+Deployments that want local enforcement need a mechanism for
+the PS to acquire the MDS's per-export client-rule list.  This
+document does not standardise such a mechanism; implementation-
+specific options include reffs-style probe-protocol extensions,
+out-of-band admin distribution, or a future revision of this
+specification.  Any such mechanism MUST itself be authenticated
+against the PS allowlist (the rules are sensitive deployment
+policy) and MUST support a refresh path so PSes see rule changes
+within a bounded time.
+
 # IANA Considerations {#iana-considerations}
 
 This document does not require any IANA action.
 
 The two new NFSv4.2 operations defined in {{sec-new-ops}}
-(OP_PROXY_REGISTRATION = 91, OP_PROXY_PROGRESS = 92) and the
+(OP_PROXY_REGISTRATION = 93, OP_PROXY_PROGRESS = 94) and the
 four new NFSv4.2 callback operations defined in
 {{sec-new-cb-ops}} (OP_CB_PROXY_MOVE = 17,
 OP_CB_PROXY_REPAIR = 18, OP_CB_PROXY_STATUS = 19,
