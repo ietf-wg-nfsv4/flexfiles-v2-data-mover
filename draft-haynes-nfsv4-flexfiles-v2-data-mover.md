@@ -782,8 +782,9 @@ NFSv4.2 callback operation numbers 17-20 (the prior version
 of this draft used them for CB_PROXY_MOVE, CB_PROXY_REPAIR,
 CB_PROXY_STATUS, and CB_PROXY_CANCEL respectively) are
 **reserved** by this document and MUST NOT be reused.  See
-{{sec-new-cb-ops}} (retained as historical context) and the
-"Major revision (2026-04-26)" front-matter section.
+the "Major revision (2026-04-26)" front-matter section and
+the IANA Considerations section ({{iana-considerations}})
+for the rationale and the wire-level reservation record.
 
 ~~~ xdr
 /// /* New operations for the Data Mover (PS -> MDS) */
@@ -838,6 +839,100 @@ point.
 ///     PROXY_CANCEL4res opproxycancel;
 ~~~
 {: #fig-nfs_resop4-amend title="nfs_resop4 amendment block"}
+
+## proxy_stateid4: A New Stateid Type {#sec-proxy-stateid}
+
+This document introduces `proxy_stateid4`, a new server-issued
+stateid type used as the canonical handle for an in-flight
+proxy migration.  The wire shape reuses the standard NFSv4
+`stateid4` from {{RFC8881}} S3.3.12; no new XDR type is added:
+
+~~~ xdr
+/// typedef stateid4  proxy_stateid4;
+~~~
+{: #fig-proxy_stateid4 title="proxy_stateid4 wire shape"}
+
+### Value Space
+
+The proxy_stateid value space is **disjoint** from the open,
+lock, layout, and delegation stateid value spaces defined in
+{{RFC8881}}.  Disjointness is enforced by *context*, not by an
+in-band tag: only PROXY_PROGRESS, PROXY_DONE, and PROXY_CANCEL
+arguments carry a `proxy_stateid4`.  An implementation MUST
+NOT use an open, lock, layout, or delegation stateid lookup
+table to resolve a proxy_stateid.  Conversely, a leaked
+proxy_stateid presented to a non-PROXY operation (e.g., READ,
+WRITE, SETATTR, CLOSE) MUST be rejected with
+NFS4ERR_BAD_STATEID by the per-op stateid validator: the
+per-op tables are disjoint by construction, and a value
+allocated as a proxy_stateid will not match any entry in any
+other table.
+
+### MDS Minting
+
+The MDS mints a fresh proxy_stateid each time it accepts a
+work assignment for delivery to a PS, and includes it in the
+`proxy_assignment4` carried in the next PROXY_PROGRESS reply.
+(The current XDR for `proxy_assignment4` does not yet carry a
+proxy_stateid field; the field is added in the same revision
+that defines this section.  See {{sec-PROXY_PROGRESS}}.)
+
+The MDS guarantees that no two proxy_stateids in the same
+(server_state, boot_seq) are equal.  An implementation MAY
+embed the MDS `boot_seq` in the high-order bytes of
+`other[12]` to enable cheap NFS4ERR_STALE_STATEID detection
+across reboots; this is informative implementation guidance,
+not a wire requirement.  The reffs implementation
+({{Implementations}}) uses the layout
+`{ uint16_t boot_seq | uint16_t reserved | uint64_t opaque }`
+where the opaque tail is `getrandom(2)` output.  The
+`reserved` field is zero in this revision; implementations
+MUST emit zero and MUST NOT reject non-zero on receipt (left
+as a forward-compat slot for widening `boot_seq`).
+
+### Lifetime
+
+A proxy_stateid is valid from the instant the MDS mints it
+until either:
+
+-  The PS issues `PROXY_DONE(proxy_stateid, ...)` or
+   `PROXY_CANCEL(proxy_stateid)` and the MDS acknowledges it.
+   On acknowledgment the proxy_stateid is retired; subsequent
+   references return `NFS4ERR_BAD_STATEID`.
+-  The PS's registration lease expires
+   ({{sec-PROXY_REGISTRATION}}), at which point all
+   proxy_stateids minted for that PS are abandoned.  Subsequent
+   references return `NFS4ERR_BAD_STATEID` (or
+   `NFS4ERR_STALE_CLIENTID` if the registration itself has been
+   purged).
+-  The MDS reboots.  Subsequent references to a proxy_stateid
+   minted in a prior boot return `NFS4ERR_STALE_STATEID`.
+
+### Renewal Semantics
+
+PROXY_PROGRESS may carry a proxy_stateid in its arguments to
+renew an in-flight assignment (a future revision of the
+PROXY_PROGRESS args extends `ppa_flags` for this purpose).
+The `seqid` field of `proxy_stateid4` follows the standard
+NFSv4 stateid seqid semantics in {{RFC8881}} S8.2.4:
+
+-  The MDS bumps `seqid` on each issuance, including renewal
+   acknowledgments.
+-  The PS sends the most recent `seqid` it has received.
+-  Out-of-order seqids are rejected with `NFS4ERR_OLD_STATEID`.
+
+### Authorization
+
+Possession of a proxy_stateid is **not** sufficient to drive
+PROXY_DONE or PROXY_CANCEL on the corresponding migration.
+The MDS additionally validates that the calling session's
+registered-PS identity matches the migration record's
+recorded owner (see the "Authorization" subsection of
+{{sec-PROXY_DONE}} for the full normative rule).  Without
+this check, a PS that learned another PS's proxy_stateid
+(through a packet capture, a leaked log, or any other channel)
+could drive its PROXY_DONE / PROXY_CANCEL on a migration it
+does not own.
 
 ## Operation 93: PROXY_REGISTRATION - Register as Data Mover {#sec-PROXY_REGISTRATION}
 
