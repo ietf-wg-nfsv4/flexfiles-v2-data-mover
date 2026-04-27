@@ -1014,18 +1014,13 @@ otherwise.  A future revision MAY define a dedicated
 PROXY_REVOKE operation if operational experience shows lease
 revocation through silence is insufficient.
 
-## Operation 94: PROXY_PROGRESS - Report Progress on an In-Flight Proxy Operation {#sec-PROXY_PROGRESS}
+## Operation 94: PROXY_PROGRESS - Heartbeat and Receive Work Assignments {#sec-PROXY_PROGRESS}
 
 ### ARGUMENTS
 
 ~~~ xdr
 /// struct PROXY_PROGRESS4args {
-///     uint64_t         ppa_registration_id;
-///     uint64_t         ppa_operation_id;
-///     bool             ppa_terminal;
-///     nfsstat4         ppa_status;
-///     uint64_t         ppa_bytes_done;
-///     uint64_t         ppa_bytes_total;
+///     uint32_t  ppa_flags;
 /// };
 ~~~
 {: #fig-PROXY_PROGRESS4args title="XDR for PROXY_PROGRESS4args"}
@@ -1033,8 +1028,30 @@ revocation through silence is insufficient.
 ### RESULTS
 
 ~~~ xdr
-/// struct PROXY_PROGRESS4res {
-///     nfsstat4         ppr_status;
+/// enum proxy_op_kind4 {
+///     PROXY_OP_MOVE         = 0,
+///     PROXY_OP_REPAIR       = 1,
+///     PROXY_OP_CANCEL_PRIOR = 2
+/// };
+///
+/// struct proxy_assignment4 {
+///     proxy_op_kind4    pa_kind;
+///     nfs_fh4           pa_file_fh;
+///     uint64_t          pa_source_dstore_id;
+///     uint64_t          pa_target_dstore_id;
+///     opaque            pa_descriptor<>;
+/// };
+///
+/// struct PROXY_PROGRESS4resok {
+///     uint32_t              ppr_lease_remaining_sec;
+///     proxy_assignment4     ppr_assignments<>;
+/// };
+///
+/// union PROXY_PROGRESS4res switch (nfsstat4 ppr_status) {
+/// case NFS4_OK:
+///     PROXY_PROGRESS4resok ppr_resok;
+/// default:
+///     void;
 /// };
 ~~~
 {: #fig-PROXY_PROGRESS4res title="XDR for PROXY_PROGRESS4res"}
@@ -1042,115 +1059,74 @@ revocation through silence is insufficient.
 ### DESCRIPTION
 
 A registered proxy server calls PROXY_PROGRESS on the
-fore-channel of its session to the MDS to report the status
-of an in-flight CB_PROXY_MOVE or CB_PROXY_REPAIR.  The PS MAY
-send progress updates at any cadence it chooses.  The MDS uses
-non-terminal updates for observability and liveness detection;
-it MUST NOT require any specific update cadence as a
-correctness condition.
+fore-channel of its session to the MDS for two purposes:
 
-The ppa_registration_id field identifies the PS's
-registration.  The ppa_operation_id field identifies the
-specific CB_PROXY_MOVE or CB_PROXY_REPAIR operation being
-reported on; it is the value the PS returned in
-cpmr_operation_id or cprr_operation_id when the MDS issued the
-directive.
+1. **Heartbeat**: extend the PS's registration lease.  The MDS
+   responds with `ppr_lease_remaining_sec` so the PS can size
+   its next poll interval.
+2. **Receive work assignments**: pick up zero or more units of
+   work the MDS has queued for this PS.  Each assignment is a
+   `proxy_assignment4` describing one migration or repair the
+   MDS wants this PS to drive.
 
-The ppa_terminal field distinguishes interim updates from the
-final status for the operation:
+Per RFC 8178 S4.4.3, `ppa_flags` is a reserved-for-future-use
+flag word; the MDS MUST reject any non-zero bit with
+`NFS4ERR_INVAL`.  The slot allows future revisions to add
+PS-side appetite signaling (e.g., "do not give me more
+assignments right now") without an XDR break.
 
--  When ppa_terminal is false, the update is an interim
-   progress report.  The ppa_status field SHOULD be NFS4_OK
-   (healthy progress) or NFS4ERR_DELAY (slower than expected
-   but still progressing).
+The MDS returns work assignments inline in
+`ppr_assignments<>`.  A PS that does not want new work simply
+ignores the assignments past its in-flight cap; the MDS does
+not retract assignments once delivered.  Each assignment names
+a single file (`pa_file_fh`), the source and target dstores
+the migration moves data between
+(`pa_source_dstore_id` / `pa_target_dstore_id`), and a
+kind-specific opaque descriptor (`pa_descriptor<>`) for future
+extensions (for example, a precomputed source-layout
+descriptor so the PS can dial source DSes without a second
+LAYOUTGET).
 
--  When ppa_terminal is true, the update is the final status
-   for this operation.  The proxy MUST NOT subsequently issue
-   PROXY_PROGRESS for the same ppa_operation_id.  Terminal
-   values of ppa_status are:
+The `pa_kind` discriminates the work type:
 
-   -  NFS4_OK: the destination layout is fully populated and
-      consistent.  The MDS proceeds to CB_LAYOUTRECALL the old
-      layout, waits for LAYOUTRETURNs, and retires the source
-      DSes.
+- `PROXY_OP_MOVE`: drain or migrate the file's data between
+  the named dstores.
+- `PROXY_OP_REPAIR`: reconstruct a missing or corrupt mirror
+  on `pa_target_dstore_id` from the surviving mirrors.
+- `PROXY_OP_CANCEL_PRIOR`: the MDS rescinds an assignment it
+  delivered in a prior PROXY_PROGRESS reply, before the PS
+  acknowledged it via OPEN+LAYOUTGET.  The PS MUST drop any
+  in-progress work for the matching `(pa_file_fh,
+  pa_target_dstore_id)` and MUST NOT issue PROXY_DONE /
+  PROXY_CANCEL for it (the MDS has already cleaned up the
+  in-flight migration record on its side).
 
-   -  NFS4ERR_PAYLOAD_LOST: for a CB_PROXY_REPAIR, the source
-      layout was degraded beyond reconstructibility and the
-      MDS MUST mark the affected byte ranges lost.  For a
-      CB_PROXY_MOVE, a catastrophic loss of both source and
-      destination during the move that cannot be recovered.
+For each MOVE / REPAIR assignment, the PS picks the work up
+by issuing a normal NFSv4 OPEN+LAYOUTGET against `pa_file_fh`
+(the L3 composite layout), shovels bytes per the kind-specific
+protocol, and reports terminal status via PROXY_DONE
+({{sec-PROXY_DONE}}) or PROXY_CANCEL ({{sec-PROXY_CANCEL}}).
 
-   -  Any other nfsstat4: proxy-specific failure.  The MDS MAY
-      retry by reassigning the operation to a different
-      registered PS (subject to the original deadline and any
-      retry policy the MDS applies).
+The `ppr_lease_remaining_sec` field is the MDS's
+acknowledgment of this PROXY_PROGRESS as a registration lease
+renewal.  It is the number of seconds remaining until the PS's
+registration would expire absent further PROXY_PROGRESS.  A
+well-behaved PS treats it as a lower bound on its next poll
+deadline; the MDS MAY return a smaller value than the standard
+NFSv4 lease period to drive a busy PS to poll more often or
+to encourage a quiet one to back off.
 
-The ppa_bytes_done and ppa_bytes_total fields are advisory.
-When the PS knows both (for example, moves on files with a
-stable size), it SHOULD populate them.  When the total is not
-known (for example, a source that is still being appended to),
-the PS MUST set ppa_bytes_total to 0; ppa_bytes_done MAY still
-carry cumulative progress.
+Polling cadence: lease/2 in steady state.  Adaptive backoff to
+lease and then 2*lease after K consecutive empty replies;
+reset on any non-empty reply.  The MDS may override the
+cadence via `ppr_lease_remaining_sec`.
 
-The MDS returns ppr_status of NFS4_OK to acknowledge a
-well-formed PROXY_PROGRESS, or an error if the registration or
-operation id is unknown.  For terminal updates, the PS MUST
-retry if it does not receive an acknowledgment within an
-implementation-defined timeout; the MDS MUST treat duplicate
-terminal updates for the same (ppa_registration_id,
-ppa_operation_id) pair as idempotent.  Non-terminal updates
-are fire-and-forget and need not be retried.
-
-`[[REVISED 2026-04-26 -- the PROXY_PROGRESS RESULTS struct is
-extended to carry work assignments inline and a lease-remaining
-hint:
-
-~~~ xdr
-/// enum proxy_op_kind4 {
-///     PROXY_OP_KIND_MOVE      = 1,
-///     PROXY_OP_KIND_REPAIR    = 2
-/// };
-///
-/// struct proxy_assignment4 {
-///     proxy_op_kind4    pa_kind;       /* MOVE, REPAIR, ... */
-///     nfs_fh4           pa_file_fh;
-///     uint64_t          pa_source_dstore_id;
-///     uint64_t          pa_target_dstore_id;
-///     /* additional kind-specific descriptors as needed */
-/// };
-///
-/// struct PROXY_PROGRESS4resok {
-///     uint32_t              ppr_lease_remaining_sec;
-/// /* (existing PROXY_PROGRESS resok fields preserved here) */
-///     proxy_assignment4     ppr_assignments<>;
-/// };
-~~~
-{: #fig-PROXY_PROGRESS-revised title="PROXY_PROGRESS extended results (2026-04-26 revision)"}
-
-A PS that wants new work calls `PROXY_PROGRESS(want_work=true)`
-(a new field added to the args).  The MDS returns zero or more
-assignments in `ppr_assignments`.  Each assignment is a unit of
-work the PS picks up; the PS issues a normal NFSv4 OPEN +
-LAYOUTGET on the file FH to acquire the migration layout, then
-shovels bytes per the kind-specific protocol, and signals
-completion via PROXY_DONE.
-
-If the PS sends `PROXY_PROGRESS(want_work=false)` (heartbeat
-only), the MDS replies with `ppr_assignments` empty.  Only the
-lease-remaining hint is informative in that case.
-
-Polling cadence: lease/2 in steady state, with adaptive backoff
-to lease/1 or 2*lease after K consecutive empty replies; reset
-on any non-empty reply.  The MDS MAY override the cadence via
-the `ppr_lease_remaining_sec` hint.
-
-Multi-PS assignment fan-out: see the new "Multi-PS Assignment
-Fan-out" section below.]]`
-
-Cancellation of an in-flight operation by the MDS is handled
-by CB_PROXY_CANCEL ({{sec-CB_PROXY_CANCEL}}).  Polled status
-queries by the MDS use CB_PROXY_STATUS
-({{sec-CB_PROXY_STATUS}}).
+The MDS-initiated cancellation case (the MDS abandons an
+in-flight assignment before the PS has driven it to terminal
+state) is signaled via the `PROXY_OP_CANCEL_PRIOR` assignment
+kind described above.  There is no separate cancel callback;
+the PS-initiated cancel is handled by the fore-channel
+PROXY_CANCEL ({{sec-PROXY_CANCEL}}).
 
 # New NFSv4.2 Callback Operations {#sec-new-cb-ops}
 
