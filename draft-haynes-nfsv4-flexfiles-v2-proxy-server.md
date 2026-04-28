@@ -1127,6 +1127,16 @@ protocol, and reports terminal status via
 PROXY_DONE(pa_stateid, ...) ({{sec-PROXY_DONE}}) or
 PROXY_CANCEL(pa_stateid) ({{sec-PROXY_CANCEL}}).
 
+`pa_file_fh` is an `nfs_fh4` minted by the MDS and presented to
+the PS for use against the same MDS.  Per {{RFC8881}} Section
+4.2.3, NFSv4 filehandles are server-private opaque tokens; the
+receiving server treats the byte string as opaque, validates it
+only by attempting the lookup, and returns NFS4ERR_STALE or
+NFS4ERR_BADHANDLE if the bytes do not resolve.  The PS MUST NOT
+inspect, mutate, or shape-check `pa_file_fh`; it forwards the
+filehandle verbatim in PUTFH on the same MDS that issued it,
+and the existing PUTFH semantics apply unchanged.
+
 The `ppr_lease_remaining_sec` field is the MDS's
 acknowledgment of this PROXY_PROGRESS as a registration lease
 renewal.  It is the number of seconds remaining until the PS's
