@@ -1,7 +1,7 @@
 ---
-title: Proxy-Driven Data Mover for Flexible Files Version 2
-abbrev: FFv2 Data Mover
-docname: draft-haynes-nfsv4-flexfiles-v2-data-mover-latest
+title: Proxy-Driven Server for Flexible Files Version 2
+abbrev: FFv2 Proxy Server
+docname: draft-haynes-nfsv4-flexfiles-v2-proxy-server-latest
 category: std
 date: {DATE}
 consensus: true
