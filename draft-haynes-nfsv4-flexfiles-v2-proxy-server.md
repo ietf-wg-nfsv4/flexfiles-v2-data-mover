@@ -2313,9 +2313,75 @@ against the PS allowlist (the rules are sensitive deployment
 policy) and MUST support a refresh path so PSes see rule changes
 within a bounded time.
 
-# IANA Considerations {#iana-considerations}
+# Implementations {#sec-implementations}
 
-This document does not require any IANA action.
+This section documents the publicly available implementation
+the editors are aware of at the time of writing, in line with
+{{?RFC7942}}.
+
+## reffs
+
+reffs is an open-source NFSv4.2 server, MDS, and erasure-coding
+client.  The reffs source ships an MDS, a Proxy Server, and a
+multi-codec client harness used as the working implementation
+for this draft.  reffs is licensed AGPL-3.0-or-later.
+
+The PS surface implemented in reffs covers, at the time of writing:
+
+- The proxy listener model (one process serving its native NFS
+  port and a per-`[[proxy_mds]]` PS port from independent SB
+  namespaces, see {{sec-design-session}}).
+- `PROXY_REGISTRATION` over RPCSEC_GSS-class auth, presently
+  exercised via mutually-authenticated RPC-over-TLS ({{RFC9289}})
+  with a client-cert SHA-256 fingerprint allowlist.  AUTH_SYS
+  over plain TCP is rejected with `NFS4ERR_PERM` per
+  {{sec-security}}.
+- `PROXY_PROGRESS` lease renewal and the empty-assignment idle
+  path used by every steady-state PS poll.
+- Forwarding of LOOKUP, OPEN, READ, WRITE, GETATTR, CLOSE,
+  LAYOUTGET, GETDEVICEINFO, LAYOUTRETURN, LAYOUTERROR through
+  the PS to the upstream MDS using the end-client's credentials.
+
+Forward-channel ops not yet exercised end-to-end in the public
+implementation include `PROXY_DONE` / `PROXY_CANCEL`, which are
+issued only after a `PROXY_PROGRESS` reply that delivers a
+`proxy_assignment4`.  The MDS-driven assignment model (move,
+repair) is wire-implemented but the only assignment kind
+exercised by the published demo is the implicit no-assignment
+heartbeat that every PROXY_PROGRESS produces.
+
+## Demonstration
+
+A reproducible demonstration of cross-PS proxying, exercising
+the layout-passthrough data path through PS-A and PS-B against a
+shared MDS + 6 DSes, lives in the reffs source under
+`deploy/sanity/`.  The demo does not exercise migration,
+repair, or any `proxy_assignment4`; its purpose is to show that
+a client's codec-encoded write through one PS is recoverable
+byte-for-byte through a peer PS that shares the same MDS.
+
+The matrix:
+
+| Path           | Layout    | Codec               | Result |
+|----------------|-----------|---------------------|--------|
+| /ffv1-csm      | FF v1     | plain mirror        | PASS   |
+| /ffv1-stripes  | FF v1     | stripe k=6, m=0     | PASS   |
+| /ffv2-csm      | FF v2     | plain mirror, CHUNK | PASS   |
+| /ffv2-rs       | FF v2     | RS(4,2), CHUNK      | PASS   |
+
+For each row the client opens
+`<path>/codec_<label>.bin` through the PS-A proxy listener,
+performs a codec-encoded write of a 96 KiB random payload, then
+opens the same filehandle through the PS-B proxy listener and
+reads it back.  The client's `cmp(1)` of the original payload
+and the PS-B-served payload returns no differences in all four
+rows.
+
+The demo is published with the reffs source; the matrix above
+is the empirical record from the most recent published run on
+the editors' infrastructure.
+
+# IANA Considerations {#iana-considerations}
 
 The fore-channel NFSv4.2 operations defined in {{sec-new-ops}}
 and {{sec-new-fore-channel}} -- OP_PROXY_REGISTRATION (93),
