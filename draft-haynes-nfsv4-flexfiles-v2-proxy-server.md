@@ -1542,9 +1542,9 @@ Both D and G converge to the same byte image.
 ### Pinned definitions
 
 - L1.mirrors = the file's pre-migration mirror set, includes D
-- L2.mirrors = (L1.mirrors \ {D}) ∪ {G}
+- L2.mirrors = (L1.mirrors \ {D}) union {G}
 - L3.M1 = L1.mirrors  (PS's read-source set)
-- L3.M2 = L1.mirrors ∪ {G}  (PS's CSM write-target set)
+- L3.M2 = L1.mirrors union {G}  (PS's CSM write-target set)
 
 ### Atomic commit on PROXY_DONE
 
